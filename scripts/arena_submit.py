@@ -79,8 +79,21 @@ def main():
         },
     )
 
+    # 自动识别代理
+    proxy = (
+        os.environ.get("https_proxy")
+        or os.environ.get("HTTPS_PROXY")
+        or os.environ.get("http_proxy")
+        or os.environ.get("HTTP_PROXY")
+    )
+    if proxy:
+        proxy_handler = urllib.request.ProxyHandler({"http": proxy, "https": proxy})
+        opener = urllib.request.build_opener(proxy_handler)
+    else:
+        opener = urllib.request.build_opener()
+
     try:
-        with urllib.request.urlopen(req, timeout=TIMEOUT) as resp:
+        with opener.open(req, timeout=TIMEOUT) as resp:
             result = json.loads(resp.read())
             score = result.get("round_score")
             print(f"OK:score={score}" if score is not None else "OK")

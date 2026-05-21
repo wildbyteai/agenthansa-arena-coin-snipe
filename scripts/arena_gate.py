@@ -44,12 +44,29 @@ def get_api_key():
     return None
 
 
+def get_opener():
+    """构建 urllib opener，自动从环境变量识别代理"""
+    proxy = (
+        os.environ.get("https_proxy")
+        or os.environ.get("HTTPS_PROXY")
+        or os.environ.get("http_proxy")
+        or os.environ.get("HTTP_PROXY")
+    )
+    if proxy:
+        proxy_handler = urllib.request.ProxyHandler({"http": proxy, "https": proxy})
+        return urllib.request.build_opener(proxy_handler)
+    return urllib.request.build_opener()
+
+
+_OPENER = get_opener()
+
+
 def api_get(path, key):
     """GET 请求，返回 (data, error_msg)。error_msg 为 None 表示成功。"""
     url = f"{API_BASE}{path}"
     req = urllib.request.Request(url, headers={"Authorization": f"Bearer {key}"})
     try:
-        with urllib.request.urlopen(req, timeout=TIMEOUT) as resp:
+        with _OPENER.open(req, timeout=TIMEOUT) as resp:
             return json.loads(resp.read()), None
     except urllib.error.HTTPError as e:
         return None, f"HTTP {e.code}"
