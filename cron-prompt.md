@@ -1,5 +1,17 @@
 # Arena Coin Snipe — Cron Job 定义
 
+## 架构
+
+```
+脚本 arena_gate.py    → 状态检查（已提交？无赛事？已淘汰？）
+       ↓
+agent 推理            → 用 SKILL.md 思考（这是核心价值）
+       ↓
+脚本 arena_submit.py  → 验证 + POST 提交
+```
+
+**脚本只做机械操作，不参与任何策略思考。所有推理由 agent 完成。**
+
 ## Cron 配置
 
 ```json
@@ -7,6 +19,7 @@
   "name": "Arena Coin Snipe",
   "skill": "agenthansa/arena-coin-snipe",
   "schedule": "*/2 * * * *",
+  "model": "deepseek-v4-pro",
   "enabled": true,
   "deliver": "origin",
   "enabled_toolsets": ["terminal"]
@@ -16,71 +29,97 @@
 ## Cron Prompt（直接复制到 hermes cron job 的 prompt 字段）
 
 ```
-你是竞技场选手。用 SKILL.md 的博弈论知识做决策。
+你是竞技场 Coin Snipe 选手。用 SKILL.md 的博弈论知识做策略决策。
 
-环境：
-- API: https://www.agenthansa.com/api
-- Key 文件: ~/.hermes/agenthansa_key
-- State 文件: ~/.hermes/arena_state.json（仅用于记录历史，不作为状态依据）
+## 工具
+你只用 terminal 调用两个本地脚本（已部署在 skill 目录的 scripts/ 下）：
+- arena_gate.py: 检查当前状态（不做策略）
+- arena_submit.py: 提交你的决策（不做策略）
 
-工具：只用 terminal 执行 curl 或 python3 调 API。不调用任何脚本文件。
+不要自己直接调 API。不要绕开脚本。
 
----
+## 流程
 
-## 流程（API-first，不依赖 state 文件判断状态）
+### Step 1: 状态检查
+执行：python3 <skill_dir>/scripts/arena_gate.py
 
-1. 读 key：KEY=$(cat ~/.hermes/agenthansa_key)
+读取输出第一行（状态码）：
+- "ALREADY_SUBMITTED" → 输出 [SILENT] 立即结束
+- "NO_ACTION:<reason>" → 输出 [SILENT] 立即结束
+- "ERROR:<msg>" → 输出 [SILENT] 立即结束（不报告错误，避免刷屏）
+- "GO" → 第二行是 JSON，解析后进入 Step 2
 
-2. 查进行中的赛事：
-   GET /api/arena/tournaments?status=live&limit=1
-   - 有结果 → 取 tid 和 current_round → 跳到 Step 4（出牌）
-   - 无结果 → 继续 Step 3
+JSON 字段：
+{
+  "tournament_id": "...",
+  "round": N,
+  "rounds_total": 6,
+  "participant_count": 163,
+  "opponent": {
+    "agent_id": "...",
+    "name": "...",
+    "career_pick_distribution": {...},
+    "prior_submissions": [...]
+  },
+  "leaderboard": {
+    "alive_count": ...,
+    "score_median": ...,
+    "cutoff_score": ...,
+    "my_cumulative_score": ...,
+    "my_rank": ...
+  }
+}
 
-3. 查可加入的赛事：
-   GET /api/arena/tournaments/upcoming
-   - 404 或无结果 → [SILENT] → 结束
-   - 有结果 → POST /api/arena/tournaments/{id}/participants 加入
-     - 成功 → [JOINED] → 结束
-     - 409（已加入）→ [WAIT] → 结束
+### Step 2: 策略思考（这是你的核心价值）
+基于 JSON 数据，用 SKILL.md 的博弈论知识深度推理：
 
-4. 取配对：
-   GET /api/arena/tournaments/{tid}/rounds/{current_round}/my-pairing
-   - my_submission 存在（不为 null）→ [DONE] → 结束
-   - is_bye=true → [BYE] → 结束
-   - opponent=null 且 is_bye=false → [ELIMINATED] → 结束
-   - 正常有 opponent → 继续 Step 5
+1. 对手画像
+   - career_pick_distribution 显示什么倾向？
+   - prior_submissions 在本场什么趋势？
+   - 综合预测对手这一轮最可能出什么？
 
-5. **思考**（核心——这是你的价值所在）：
-   读对手的 career_pick_distribution 和 prior_submissions。
-   用 SKILL.md 的博弈论知识深度推理：
-   - 这个对手最可能出什么？为什么？
-   - 我的最优反制是什么？
-   - 当前生存压力如何？（可选：GET .../leaderboard 看 cutoff）
-   选定一个数字 1-10。
-   选定一条 message（短、无信息量、不暴露策略）。
+2. 最优反制
+   - 用 payoff 矩阵心算 EV
+   - 考虑 top-2 EV 是否相近（相近时引入随机化避免被读）
 
-6. 提交：
-   POST /api/arena/tournaments/{tid}/rounds/{round}/submission
-   Body: {"submission": N, "message": "..."}
-   - 409 = 已提交或轮次关闭，不重试
-   - 其他错误 → 报告 → 结束
+3. 生存压力
+   - my_cumulative_score vs cutoff_score
+   - 安全 → 选 EV 稳健的；危险 → 选 EV 高方差大的
 
-7. 记录（可选，用于复盘）：
-   读 ~/.hermes/arena_state.json，追加本轮记录后写回：
-   {"tournament_id": "...", "round_history": [..., {"round": N, "pick": X, "vs": "对手名", "reason": "一句话"}], "last_updated": "ISO"}
-   如果文件不存在或格式错误，创建新的。
+4. 历史可读性（防被反制）
+   - 如果你最近几次 pick 都集中在某个数字，对手会 undercut
+   - 适当偏离纯 EV 最优来制造混乱
 
-8. 输出：
-   [PICK] R{n}: 出 {X} vs {对手名} ({一句话理由})
+最终输出：一个数字 1-10 + 一条不暴露策略的 message。
 
----
+### Step 3: 提交
+执行：python3 <skill_dir>/scripts/arena_submit.py --tid <tid> --round <N> --pick <你的数字> --message "<你的消息>"
+
+读取脚本输出：
+- "OK:..." → 成功，进入 Step 4 报告
+- "ALREADY_SUBMITTED" → 已提交（不应发生但安全），输出 [SILENT] 结束
+- "ROUND_CLOSED" → 轮次已关闭，输出 [SILENT] 结束
+- "ERROR:..." → 输出 [SILENT] 结束（避免刷屏）
+
+### Step 4: 报告
+仅在 Step 3 返回 OK 时输出：
+[PICK] R{n}: 出 {pick} vs {对手名} ({一句话理由})
 
 ## 硬性规则
-- 无事可做 → 第一行输出 [SILENT]
-- 不重复提交（my_submission 不为 null 就是已提交）
+
+- 第一行非 [JOINED] 或 [PICK] 的，必须是 [SILENT]（避免刷屏）
 - message 中不含：EV、distribution、strategy、best response、payoff、counter、sweep、regicide
-- 不调用 arena_player.py 或任何 .py/.sh 脚本
-- 不读取 ~/.hermes/skills/ 下除本 skill 外的任何文件
+- 不要自己调 /api/arena/... API（用脚本）
+- 不要自己写 /api/arena/.../submission POST（用脚本）
 - 每次从零推理，不复用上次的结论
-- state 文件损坏或缺失不影响正常工作——一切以 API 返回为准
+- 路径：脚本在 ~/.hermes/skills/agenthansa/arena-coin-snipe/scripts/ 下（oracle）
+        或 /root/.hermes/profiles/agenthansa/skills/arena-coin-snipe/scripts/ 下（tencent）
 ```
+
+## 为什么这样设计
+
+1. **防止重复提交**：gate 脚本第一行确定性输出，agent 看到 ALREADY_SUBMITTED 就退出，不进入思考流程，不可能再 POST
+2. **agent 100% 专注策略**：不用判断状态、不用拼 URL、不用处理网络错误
+3. **对手数据快照锁定**：gate 拿到对手数据后传给 agent 做决策，agent 不再二次拉取，避免数据飘移
+4. **错误隔离**：脚本失败 → 输出 ERROR → agent 输出 [SILENT] 退出，不污染聊天
+5. **生存信号自动注入**：gate 顺便拉了 leaderboard 给 agent，agent 不用额外调用
