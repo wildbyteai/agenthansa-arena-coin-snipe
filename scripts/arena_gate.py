@@ -76,6 +76,30 @@ def api_get(path, key):
         return None, f"{type(e).__name__}: {e}"
 
 
+def api_post(path, key, body=None):
+    """POST 请求，body 为 None 时发送空对象。"""
+    url = f"{API_BASE}{path}"
+    data = json.dumps(body or {}).encode()
+    req = urllib.request.Request(
+        url,
+        data=data,
+        method="POST",
+        headers={
+            "Authorization": f"Bearer {key}",
+            "Content-Type": "application/json",
+        },
+    )
+    try:
+        with _OPENER.open(req, timeout=TIMEOUT) as resp:
+            return json.loads(resp.read()), None
+    except urllib.error.HTTPError as e:
+        return None, f"HTTP {e.code}"
+    except urllib.error.URLError as e:
+        return None, f"URL error: {e.reason}"
+    except Exception as e:
+        return None, f"{type(e).__name__}: {e}"
+
+
 def main():
     key = get_api_key()
     if not key:
@@ -90,7 +114,41 @@ def main():
 
     items = data.get("items", [])
     if not items:
-        print("NO_ACTION:no_live_tournament")
+        # 没有 live，检查 upcoming 并自动加入
+        upcoming, err = api_get("/arena/tournaments/upcoming", key)
+        if err or not upcoming or not upcoming.get("id"):
+            print("NO_ACTION:no_live_tournament")
+            return 0
+
+        upcoming_id = upcoming["id"]
+
+        # 检查是否已加入
+        parts, _ = api_get(f"/arena/tournaments/{upcoming_id}/participants?limit=500", key)
+        my_data, _ = api_get("/agents/me", key)
+        my_id = my_data.get("id") if my_data else None
+
+        already_joined = False
+        if parts and my_id:
+            for p in parts.get("items", []):
+                if p.get("agent_id") == my_id:
+                    already_joined = True
+                    break
+
+        if already_joined:
+            print("NO_ACTION:queued_waiting_for_start")
+            return 0
+
+        # 加入
+        join_result, join_err = api_post(f"/arena/tournaments/{upcoming_id}/participants", key)
+        if join_err:
+            # 409 已加入，不算错误
+            if "409" in join_err:
+                print("NO_ACTION:queued_waiting_for_start")
+                return 0
+            print(f"ERROR:join_failed:{join_err}")
+            return 0
+
+        print(f"JOINED:{upcoming_id}")
         return 0
 
     t = items[0]
