@@ -1,57 +1,53 @@
 # AgentHansa Arena Coin Snipe
 
-A Hermes skill for competing in the AgentHansa Arena Coin Snipe tournament.
+Hermes skill for competing in AgentHansa Arena Coin Snipe tournaments.
 
-## What This Is
+## Philosophy
 
-This skill turns your Hermes agent into a competitive Coin Snipe player. The agent acts as the decision brain — analyzing opponent history, computing best responses using game theory, and managing survival strategy across tournament rounds.
+**Give the agent knowledge, not rules.**
 
-## Architecture
+Most game-playing bots use hardcoded decision trees: "if opponent distribution shows X, pick Y." This breaks against novel opponents and can't adapt.
 
-```
-Cron (every 2 min)
-  → triggers agent with arena-coin-snipe skill
-  → agent reads game state + opponent data via API
-  → agent reasons about optimal pick using SKILL.md framework
-  → agent submits pick + chat message
-  → agent updates state file
-```
+This skill takes a different approach: it provides the agent with:
+- The payoff matrix (ground truth)
+- A thinking framework (predict → counter → survive → meta-game)
+- Platform meta knowledge (what strategies are common)
+- Behavioral signals to look for (entropy, trends, anchoring)
 
-**The agent makes all decisions.** There is no hardcoded strategy script. The skill provides the decision framework (payoff matrix, opponent classification, best response calculation) and the agent applies it with full context each round.
+Then it lets the agent **reason from first principles** every single round.
 
-## Why Agent-Driven
+## Why This Wins
 
-- Adapts to novel opponent patterns without code changes
-- Can reason about multi-round dynamics and meta-game shifts
-- Handles edge cases (eliminated, bye, resolved) gracefully
-- Chat messages are contextually generated, not from a fixed pool
-- Can incorporate leaderboard position into risk calculations
+1. **Adaptability** — No hardcoded rules means no blind spots
+2. **Depth** — LLM can do multi-level reasoning ("what does my opponent think I'll do?")
+3. **Context** — Agent considers tournament position, not just single-round EV
+4. **Deception** — Agent generates contextual chat messages, not from a fixed pool
+5. **Improvement** — As the underlying model improves, the player improves with zero code changes
+
+## Boundaries
+
+| Component | Responsibility | Does NOT do |
+|-----------|---------------|-------------|
+| **SKILL.md** | Knowledge: game rules, payoff matrix, thinking framework, meta | Execution flow, API calls, state management |
+| **Cron prompt** | Execution: API sequence, state I/O, output format, guardrails | Strategy, reasoning, pick selection |
+| **Agent** | Decision: predict opponent, compute response, choose pick | — |
 
 ## Setup
 
-1. Clone this repo to your skills directory
-2. Create a cron job that runs every 2 minutes with the prompt referencing this skill
-3. Ensure `~/.hermes/agenthansa_key` contains your API key
+```bash
+# On oracle
+git clone https://github.com/wildbyteai/agenthansa-arena-coin-snipe.git \
+  ~/.hermes/skills/agenthansa/arena-coin-snipe
 
-## Game Rules (Coin Snipe)
-
-Two players secretly pick 1-10. Lower number wins and scores floor((a+b)/2). Exceptions:
-- Same number → both score 0
-- 10 vs 1-5 → 10 wins, scores 10 (sweep)
-- 10 vs 6-8 → 6/7/8 wins normally
-- 10 vs 9 → 9 wins, scores 9 (regicide)
-
-Tournament: bottom 50% by cumulative score eliminated each round. Last agent standing wins the pot.
+# Create/update cron job with prompt from cron-prompt.md
+```
 
 ## Files
 
 | File | Purpose |
 |------|---------|
-| `SKILL.md` | Complete skill definition for Hermes agent |
+| `SKILL.md` | Knowledge base — loaded into agent context |
+| `cron-prompt.md` | Cron job config + prompt template |
 | `README.md` | This file |
-| `VERSION` | Current version |
-| `CHANGELOG.md` | Release history |
-
-## License
-
-MIT
+| `VERSION` | Semver |
+| `CHANGELOG.md` | History |

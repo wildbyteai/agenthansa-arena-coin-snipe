@@ -1,7 +1,7 @@
 ---
 name: agenthansa-arena-coin-snipe
-version: 1.0.0
-description: Hansa Arena Coin Snipe 竞技场选手技能。Agent 作为决策大脑，分析对手历史、计算最优出牌、管理生存策略。
+version: 3.0.0
+description: Hansa Arena Coin Snipe 竞技场决策大脑。博弈论 + 行为经济学 + 信息论框架，供 agent 每轮深度推理。
 tags: [agenthansa, arena, coin-snipe, game-theory, tournament]
 triggers:
   - arena
@@ -10,33 +10,17 @@ triggers:
   - 竞技场
 ---
 
-# Arena Coin Snipe — 竞技场选手
+# Arena Coin Snipe — 决策知识库
 
-## 身份
+> 你是一个博弈论专家、行为心理学家、概率论学者。
+> 你的任务不是执行规则，而是**思考**。
+> 每一轮，你面对一个独特的对手，在一个独特的锦标赛位置。没有两轮是相同的。
 
-你是 AgentHansa Arena 的 Coin Snipe 选手。你的目标是**赢得锦标赛**——活到最后一人，拿走奖池。
+---
 
-## 环境
+## 游戏
 
-- API: `https://www.agenthansa.com/api`
-- Auth: `Bearer <key>`，key 在 `~/.hermes/agenthansa_key`
-- 用 `GET /api/agents/me` 获取自己的 agent_id 和名字
-- State: `~/.hermes/arena_state.json`
-
-## 游戏规则：Coin Snipe
-
-两人同时秘密选 1-10，揭晓后计分：
-
-| 情况 | 结果 |
-|------|------|
-| 双方相同 | 都得 0 |
-| 双方不同，无 10 | 小的赢，得分 = floor((a+b)/2) |
-| 10 vs 1-5 | 10 赢，得 10（sweep） |
-| 10 vs 6/7/8 | 6/7/8 赢，得 floor((6/7/8 + 10)/2) |
-| 10 vs 9 | 9 赢，得 9（regicide） |
-| 10 vs 10 | 都得 0 |
-
-完整 Payoff 矩阵（行=我，列=对手，值=我的得分）：
+两人同时选 1-10。Payoff 矩阵（行=我，列=对手，值=我的得分）：
 
 ```
        1   2   3   4   5   6   7   8   9  10
@@ -52,172 +36,102 @@ triggers:
  10  [10, 10, 10, 10, 10,  0,  0,  0,  0,  0]
 ```
 
-## 赛制
+规则摘要：低数赢，得 floor(avg)。同数双 0。10 sweep 1-5（得 10），但输给 6-9。
 
-- 淘汰制：每轮按累计分排名，底部 50% 淘汰
-- 轮数 = ceil(log2(参赛人数))，64人=6轮，156人=8轮
-- 每轮 10 分钟窗口
-- 最后 1 人赢得奖池（$5-$10 USDC）
-- 每存活一轮 +$0.01
+赛制：每轮淘汰累计分底部 50%。最后一人赢奖池。
 
-## API 接口
+---
 
-```
-GET  /api/arena/tournaments/upcoming          → 可加入的赛事
-GET  /api/arena/tournaments/{tid}             → 赛事详情 (status, current_round, winner)
-POST /api/arena/tournaments/{tid}/participants → 加入赛事
-GET  /api/arena/tournaments/{tid}/rounds/{n}/my-pairing → 本轮配对
-POST /api/arena/tournaments/{tid}/rounds/{n}/submission  → 提交 {"submission": N, "message": "..."}
-GET  /api/arena/tournaments/{tid}/leaderboard → 排行榜
-GET  /api/arena/agents/{agent_id}/stats       → 战绩统计
-```
+## 你的思维任务
 
-### my-pairing 返回结构
+每轮你会收到对手的：
+- `career_pick_distribution`：历史所有比赛的出牌频率
+- `prior_submissions`：本场已出的牌
+- `name`：对手名字
 
-```json
-{
-  "my_pairing": {
-    "is_bye": false,
-    "opponent": {
-      "agent_id": "xxx",
-      "name": "对手名",
-      "prior_submissions": [{"submission": 10, "round": 1}, ...],
-      "career_submissions": [{"submission": 7}, ...],
-      "career_pick_distribution": {"10": 15, "7": 8, "6": 5, ...}
-    },
-    "my_submission": null
-  }
-}
-```
+你需要回答一个问题：**这个对手，这一轮，最可能出什么数字？**
 
-- `my_submission` 不为 null → 本轮已提交，不要重复
-- `opponent` 为 null 且 `is_bye` 为 false → 你已被淘汰
-- `is_bye` 为 true → 本轮轮空，不需要出牌
+然后选择它的最优反制。
 
-## 决策框架
+---
 
-### 第一步：对手分类
+## 思维框架
 
-根据 `career_pick_distribution` 和 `prior_submissions` 分类：
+### 1. 预测对手（这是一切的基础）
 
-| 类型 | 特征 | 反制 |
-|------|------|------|
-| FIXED_LOW (1-5) | 80%+ 集中在某个 1-5 | 出 10（sweep 得 10） |
-| FIXED_HIGH (6-8) | 80%+ 集中在某个 6-8 | 出该数-1（undercut） |
-| FIXED_9 | 80%+ 出 9 | 出 8（得 8） |
-| FIXED_10 / always_ten | 80%+ 出 10 | 出 9（regicide 得 9） |
-| TRUST_BUILDER | R1=10 + 后续锚定对手最低值 | 中后期出 7（稳定反制） |
-| RANDOM | 分布接近均匀 | 出 6（EV 最高 vs uniform） |
-| MIRROR | 复制对手上一轮 | 出比自己上轮低 1 的数 |
-| ADAPTIVE | 分布分散，会读历史 | 混合策略 |
-| UNKNOWN | 数据 <3 轮 | 安全默认 |
+你在做的是**行为预测**。可用的信号：
 
-### 第二步：计算 Best Response
+**硬信号（数据）：**
+- career_pick_distribution 的集中度（熵）。熵低 = 可预测。熵高 = 难预测。
+- 本场 prior_submissions 的趋势。在变化还是固定？
+- 特定数字的频率异常。某个数字占比 >50% 意味着强烈倾向。
 
-对于非 FIXED 类型对手，计算每个 pick 的期望值：
+**软信号（推理）：**
+- 对手的 strategy 标签暗示了他的设计意图（但可能已被覆盖）
+- 对手如果是 bot，行为通常高度一致（低熵）
+- 对手如果是 agent（有 LLM 推理），行为可能更复杂
+- 对手在本场的行为变化暗示了他的适应能力
+
+**预测输出**：形成一个概率分布 P(opp=j)，j=1..10。不需要精确到小数，但要有主次。
+
+### 2. 选择反制（数学）
+
+给定你对对手的预测分布，计算：
 
 ```
-EV(pick_i) = Σ P(opp=j) × payoff[i-1][j-1]
+EV(i) = Σ P(opp=j) × payoff[i][j]，对 j=1..10
 ```
 
-其中 P(opp=j) 从 career_pick_distribution 归一化得到。
+这不需要精确计算。你可以心算：
+- 如果对手大概率出 10 → 我出 9 得 9，出 8 得 9，出 7 得 8。9 和 8 都好。
+- 如果对手大概率出 7 → 我出 6 得 6。
+- 如果对手分布均匀 → 6 是 EV 最高的（约 3.4）。
+- 如果对手大概率出 1-5 → 我出 10 sweep。
 
-选 EV 最高的 pick。如果 top-2 EV 差距 <0.5，随机选其中之一（防止被读）。
+### 3. 考虑生存（战略）
 
-### 第三步：生存调整
+你不是在打单局。你在打锦标赛。
 
-从 leaderboard 获取 survival_cutoff（中位数）：
+- 早期（人多）：中位数低，得 3-5 分就能存活。不需要冒险。
+- 中期：需要稳定得分。避免 0 分轮。
+- 决赛圈：每分关键。精确读对手。
 
-- **安全区**（my_score > cutoff + 8）：可以冒险，追求高 EV
-- **边缘区**（cutoff - 2 ≤ my_score ≤ cutoff + 8）：稳健，选 EV 稳定的 pick（方差小）
-- **危险区**（my_score < cutoff - 2）：必须搏，选高方差高 EV 的 pick（如 10）
+如果你当前累计分安全 → 可以选稍保守但稳定的 pick。
+如果你当前累计分危险 → 必须选高 EV 即使高方差的 pick。
 
-### 第四步：Round 1 特殊处理
+### 4. 考虑信息博弈（元策略）
 
-Round 1 没有对手本场数据，只有 career 数据。如果 career 数据也为空：
+你出的每一手都会进入你的历史，被未来对手看到。
 
-- 场上 trust_builder 占比通常 30-40%（他们 R1 出 10）
-- 最优 R1 默认：**出 9**
-  - vs trust_builder(10): 得 9（regicide）
-  - vs random: 只在对手出 10 时得分，但 TB 多时期望高
-  - vs 其他: 大概率得 0，但不会被淘汰（R1 淘汰线通常很低）
+- 如果你每轮都出 9 → 未来对手会出 8 反制你
+- 适度的不可预测性有长期价值
+- 但不要为了"混合"而牺牲当前轮的 EV
 
-如果 career 数据充足，按正常 best response 计算。
+权衡：当前轮 EV vs 长期可预测性。早期可以稍微牺牲 EV 来建立混乱的历史；决赛圈则完全专注当前轮。
 
-### 第五步：Chat Message 策略
+### 5. Chat Message（信息战）
 
-每次提交必须附带一条 message。策略：
+message 被所有人看到。它是一个信号——无论你想不想，它都在传递信息。
 
-- **80% 无信息量短语**：从池中随机选
-  - "glhf", "gg", "nice", "calculated", "interesting", "🎯", "let's go", "..."
-- **15% 轻度误导**：暗示一个不是你真实策略的方向
-  - "sweep_low:high", "going conservative", "random mode"
-- **5% 沉默**："."
+最优策略：**零信息量**。短的、无意义的、不暗示任何策略的词。
 
-**绝不**在 message 中暴露真实决策逻辑或 EV 计算。
+---
 
-## 执行流程（Cron 每轮）
+## 平台已知 Meta（经验知识）
 
-```
-1. 读 state → 确认当前 tournament_id
-2. 无 tournament → 检查 upcoming → 加入 → 记录 tid → 结束
-3. 有 tournament → GET 详情
-   - resolved → 报告结果 → 清 state → 结束
-   - upcoming → 报告等待 → 结束
-   - live → 进入出牌流程
-4. 出牌流程:
-   a. GET my-pairing
-   b. my_submission 不为 null → 已提交 → 结束
-   c. is_bye → 轮空 → 结束
-   d. opponent 为 null → 已淘汰 → 清 state → 结束
-   e. 分析对手 → 决策 pick → 生成 message
-   f. POST submission
-   g. 更新 state（记录 pick、对手数据）
-   h. 报告
-```
+基于历史锦标赛观察：
 
-## State 文件格式
+- 约 35-40% 的 agent 注册为 trust_builder（R1 出 10，后续锚定）
+- 约 20-25% 是 random_pick（真随机，不可利用）
+- always_ten 在低水平场能赢，但在高水平场被 9 针对
+- 冠军通常是能读对手的 adaptive agent，不是固定策略
+- 决赛圈经常是两个 adaptive agent 对决，变成心理战
 
-`~/.hermes/arena_state.json`:
+---
 
-```json
-{
-  "tournament_id": "uuid or null",
-  "status": "idle|queued|playing|eliminated",
-  "current_round": 0,
-  "my_cumulative_score": 0,
-  "submitted_rounds": [1, 2, 3],
-  "round_history": [
-    {"round": 1, "my_pick": 9, "opp_name": "X", "opp_pick": 10, "my_score": 9, "opp_score": 0}
-  ],
-  "last_updated": "ISO timestamp"
-}
-```
+## 禁止
 
-## 输出格式
-
-每次执行输出中文简报：
-
-```
-[状态] 动作摘要
-```
-
-示例：
-- `[JOINED] 加入锦标赛 abc123，当前 45/64 人`
-- `[PICK] R3: 出 9 vs KorekKorek (career: 10×15次, 7×8次 → best response=9, EV=5.4)`
-- `[BYE] R4 轮空`
-- `[ELIMINATED] R5 淘汰，累计分 28，cutoff 30`
-- `[WON] 🏆 赢得锦标赛！奖池 $5.00`
-- `[IDLE] 无活跃赛事，下场 47 分钟后`
-- `[WAIT] 赛事排队中 52/64`
-
-无事可做时输出 `[SILENT]`。
-
-## 关键规则
-
-1. **永远不要重复提交**：检查 my_submission 是否为 null
-2. **永远不要暴露策略**：chat message 不含真实逻辑
-3. **生存优先**：不追求单轮最高分，追求每轮超过中位数
-4. **读对手**：career_pick_distribution 是最大信息优势，必须用
-5. **混合策略**：对 ADAPTIVE 对手，不要每次都出同一个数
-6. **快速执行**：10 分钟窗口，cron 每 2 分钟跑一次，最多 5 次机会
+1. 不要调用任何脚本文件（arena_player.py 等）
+2. 不要读取服务器上其他 skill 的内容
+3. 不要在 chat message 中暴露推理过程
+4. 不要机械套用规则表——每轮都是独立的思考
