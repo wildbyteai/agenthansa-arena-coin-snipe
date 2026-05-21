@@ -1,16 +1,11 @@
 # Arena Coin Snipe — Cron Job 定义
 
-## 架构
+## 设计原则
 
-```
-脚本 arena_gate.py    → 状态检查（已提交？无赛事？已淘汰？）
-       ↓
-agent 推理            → 用 SKILL.md 思考（这是核心价值）
-       ↓
-脚本 arena_submit.py  → 验证 + POST 提交
-```
-
-**脚本只做机械操作，不参与任何策略思考。所有推理由 agent 完成。**
+- Prompt 只给具体的 terminal 命令，不描述数据结构
+- 模型必须执行 terminal 才能获得信息，无法"脑补"
+- 本地 state 文件做幂等检查（API 的 my_submission 字段不可靠）
+- SKILL.md 通过 skill 引用自动注入 context，提供博弈论知识
 
 ## Cron 配置
 
@@ -19,107 +14,63 @@ agent 推理            → 用 SKILL.md 思考（这是核心价值）
   "name": "Arena Coin Snipe",
   "skill": "agenthansa/arena-coin-snipe",
   "schedule": "*/2 * * * *",
-  "model": "deepseek-v4-pro",
-  "enabled": true,
+  "enabled": false,
   "deliver": "origin",
   "enabled_toolsets": ["terminal"]
 }
 ```
 
-## Cron Prompt（直接复制到 hermes cron job 的 prompt 字段）
+## Oracle Prompt
 
 ```
-你是竞技场 Coin Snipe 选手。用 SKILL.md 的博弈论知识做策略决策。
+执行竞技场出牌任务。严格按步骤用 terminal 执行，每一步都必须看到真实输出后再继续。
 
-## 工具
-你只用 terminal 调用两个本地脚本（已部署在 skill 目录的 scripts/ 下）：
-- arena_gate.py: 检查当前状态（不做策略）
-- arena_submit.py: 提交你的决策（不做策略）
+Step 1: 读取 API key
+terminal: KEY=$(cat ~/.hermes/agenthansa_key) && echo "KEY_OK"
 
-不要自己直接调 API。不要绕开脚本。
+Step 2: 查赛事状态
+terminal: curl -s -H "Authorization: Bearer $(cat ~/.hermes/agenthansa_key)" "https://www.agenthansa.com/api/arena/tournaments?status=live&limit=1"
 
-## 流程
+如果 items 为空：
+  terminal: curl -s -H "Authorization: Bearer $(cat ~/.hermes/agenthansa_key)" "https://www.agenthansa.com/api/arena/tournaments/upcoming"
+  如果有结果 → terminal: curl -s -X POST -H "Authorization: Bearer $(cat ~/.hermes/agenthansa_key)" -H "Content-Type: application/json" -d "{}" "https://www.agenthansa.com/api/arena/tournaments/{id}/participants"
+  输出 [JOINED] 或 [SILENT] → 结束
 
-### Step 1: 状态检查
-执行：python3 <skill_dir>/scripts/arena_gate.py
+如果 items 有赛事 → 记住 tid 和 current_round，继续。
 
-读取输出第一行（状态码）：
-- "ALREADY_SUBMITTED" → 输出 [SILENT] 立即结束
-- "NO_ACTION:<reason>" → 输出 [SILENT] 立即结束
-- "ERROR:<msg>" → 输出 [SILENT] 立即结束（不报告错误，避免刷屏）
-- "GO" → 第二行是 JSON，解析后进入 Step 2
+Step 3: 幂等检查
+terminal: cat ~/.hermes/arena_state.json 2>/dev/null || echo "{}"
 
-JSON 字段：
-{
-  "tournament_id": "...",
-  "round": N,
-  "rounds_total": 6,
-  "participant_count": 163,
-  "opponent": {
-    "agent_id": "...",
-    "name": "...",
-    "career_pick_distribution": {...},
-    "prior_submissions": [...]
-  },
-  "leaderboard": {
-    "alive_count": ...,
-    "score_median": ...,
-    "cutoff_score": ...,
-    "my_cumulative_score": ...,
-    "my_rank": ...
-  }
-}
+检查 submitted 数组里有没有 "{tid}_R{round}"。有 → 输出 [SILENT] 结束。
 
-### Step 2: 策略思考（这是你的核心价值）
-基于 JSON 数据，用 SKILL.md 的博弈论知识深度推理：
+Step 4: 查对手
+terminal: curl -s -H "Authorization: Bearer $(cat ~/.hermes/agenthansa_key)" "https://www.agenthansa.com/api/arena/tournaments/{tid}/rounds/{round}/my-pairing"
 
-1. 对手画像
-   - career_pick_distribution 显示什么倾向？
-   - prior_submissions 在本场什么趋势？
-   - 综合预测对手这一轮最可能出什么？
+如果 is_bye=true 或 opponent 为空 → [SILENT] 结束。
+否则读取对手的 career_pick_distribution 和 prior_submissions。
 
-2. 最优反制
-   - 用 payoff 矩阵心算 EV
-   - 考虑 top-2 EV 是否相近（相近时引入随机化避免被读）
+Step 5: 决策
+用 SKILL.md 的博弈论知识推理：对手最可能出什么？我的最优反制？
+选一个数字 1-10 和一条短 message（不暴露策略）。
 
-3. 生存压力
-   - my_cumulative_score vs cutoff_score
-   - 安全 → 选 EV 稳健的；危险 → 选 EV 高方差大的
+Step 6: 提交
+terminal: curl -s -X POST -H "Authorization: Bearer $(cat ~/.hermes/agenthansa_key)" -H "Content-Type: application/json" -d '{"submission": N, "message": "xxx"}' "https://www.agenthansa.com/api/arena/tournaments/{tid}/rounds/{round}/submission"
 
-4. 历史可读性（防被反制）
-   - 如果你最近几次 pick 都集中在某个数字，对手会 undercut
-   - 适当偏离纯 EV 最优来制造混乱
+Step 7: 写 state 防重复
+terminal: python3 -c "import json,os; f=os.path.expanduser('~/.hermes/arena_state.json'); s=json.load(open(f)) if os.path.exists(f) else {}; s.setdefault('submitted',[]).append('{tid}_R{round}'); s['submitted']=s['submitted'][-50:]; json.dump(s,open(f,'w'))"
 
-最终输出：一个数字 1-10 + 一条不暴露策略的 message。
+Step 8: 输出
+[PICK] R{round}: 出 {N} vs {对手名} ({一句话理由})
 
-### Step 3: 提交
-执行：python3 <skill_dir>/scripts/arena_submit.py --tid <tid> --round <N> --pick <你的数字> --message "<你的消息>"
-
-读取脚本输出：
-- "OK:..." → 成功，进入 Step 4 报告
-- "ALREADY_SUBMITTED" → 已提交（不应发生但安全），输出 [SILENT] 结束
-- "ROUND_CLOSED" → 轮次已关闭，输出 [SILENT] 结束
-- "ERROR:..." → 输出 [SILENT] 结束（避免刷屏）
-
-### Step 4: 报告
-仅在 Step 3 返回 OK 时输出：
-[PICK] R{n}: 出 {pick} vs {对手名} ({一句话理由})
-
-## 硬性规则
-
-- 第一行非 [JOINED] 或 [PICK] 的，必须是 [SILENT]（避免刷屏）
-- message 中不含：EV、distribution、strategy、best response、payoff、counter、sweep、regicide
-- 不要自己调 /api/arena/... API（用脚本）
-- 不要自己写 /api/arena/.../submission POST（用脚本）
-- 每次从零推理，不复用上次的结论
-- 路径：脚本在 ~/.hermes/skills/agenthansa/arena-coin-snipe/scripts/ 下（oracle）
-        或 /root/.hermes/profiles/agenthansa/skills/arena-coin-snipe/scripts/ 下（tencent）
+硬性规则：
+- 每一步必须用 terminal 执行并看到真实输出，不要跳步
+- 无动作时输出 [SILENT]
+- message 不含技术词汇（EV、strategy、payoff 等）
 ```
 
-## 为什么这样设计
+## Tencent Prompt
 
-1. **防止重复提交**：gate 脚本第一行确定性输出，agent 看到 ALREADY_SUBMITTED 就退出，不进入思考流程，不可能再 POST
-2. **agent 100% 专注策略**：不用判断状态、不用拼 URL、不用处理网络错误
-3. **对手数据快照锁定**：gate 拿到对手数据后传给 agent 做决策，agent 不再二次拉取，避免数据飘移
-4. **错误隔离**：脚本失败 → 输出 ERROR → agent 输出 [SILENT] 退出，不污染聊天
-5. **生存信号自动注入**：gate 顺便拉了 leaderboard 给 agent，agent 不用额外调用
+同上，区别：
+- Key: `$AGENTHANSA_API_KEY`（环境变量）
+- 所有 curl 加 `--proxy http://127.0.0.1:7890`
+- State 文件: `~/arena_state.json`

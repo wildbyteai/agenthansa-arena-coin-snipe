@@ -220,18 +220,28 @@ def main():
         print("[SILENT]")
         return
 
-    # Step 2: 查 my-pairing
+    # Step 2: 本地幂等检查（API 的 my_submission 字段不可靠，永远返回 null）
+    state_file = os.path.expanduser("~/.hermes/arena_state.json")
+    state = {}
+    try:
+        if os.path.exists(state_file):
+            with open(state_file) as f:
+                state = json.load(f)
+    except (json.JSONDecodeError, IOError):
+        state = {}
+
+    submitted_key = f"{tid}_R{rnd}"
+    if submitted_key in state.get("submitted", []):
+        print("[SILENT]")
+        return
+
+    # Step 3: 查 my-pairing
     pairing_data, err = api_get(f"/arena/tournaments/{tid}/rounds/{rnd}/my-pairing", key)
     if err:
         print("[SILENT]")
         return
 
     p = pairing_data.get("my_pairing", {})
-
-    # 已提交 → 静默
-    if p.get("my_submission") is not None:
-        print("[SILENT]")
-        return
 
     # 轮空
     if p.get("is_bye"):
@@ -308,6 +318,18 @@ REASON=<一句话理由>"""
         else:
             print("[SILENT]")
         return
+
+    # Step 7: 写入本地 state 防重复
+    submitted = state.get("submitted", [])
+    submitted.append(submitted_key)
+    state["submitted"] = submitted[-50:]  # 只保留最近 50 条
+    state["tournament_id"] = tid
+    state["last_pick"] = {"round": rnd, "pick": pick, "vs": opp_name}
+    try:
+        with open(state_file, "w") as f:
+            json.dump(state, f, ensure_ascii=False)
+    except IOError:
+        pass
 
     print(f"[PICK] R{rnd}: 出 {pick} vs {opp_name} ({reason})")
 
